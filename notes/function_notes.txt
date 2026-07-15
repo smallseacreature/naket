@@ -1,0 +1,45 @@
+0x04 is Forwarded NPDU.
+
+A BBMD uses it when forwarding a BACnet broadcast from another device or subnet.
+
+The body layout is:
+
+Bytes 0–3: Original sender’s IPv4 address
+Bytes 4–5: Original sender’s UDP port
+Bytes 6+:  NPDU
+
+Remember: data here is only the BVLC body because process_bvlc() already removed the four-byte BVLC header.
+
+0x05 — Register Foreign Device
+
+This function is used by a device outside the local BACnet/IP subnet to register with a BBMD so it can receive forwarded BACnet broadcasts.
+
+The TTL is important because it tells the BBMD how long to keep the foreign device registered in its Foreign Device Table.
+
+It is not the IP packet TTL. It is a BACnet registration lifetime, usually in seconds.
+
+For example:
+
+TTL = 60
+
+means the foreign device’s registration is valid for about 60 seconds. The device must register again before that expires.
+
+Why that matters:
+
+It removes stale devices automatically if they disconnect.
+It prevents the FDT from filling with dead registrations.
+It tells you how often a legitimate foreign device should re-register.
+It helps detect unusual behavior.
+
+A new, unknown device registering
+An unusually long TTL
+Very frequent registration attempts
+Repeated failed registrations
+A device registering from an unexpected network
+
+0x07 — Read Foreign Device Table ACK is the response that actually contains the BBMD’s Foreign Device Table entries. Each entry is 10 bytes:
+
+Bytes 0–3: Foreign device IPv4 address
+Bytes 4–5: Foreign device UDP port
+Bytes 6–7: Registered TTL
+Bytes 8–9: Seconds remaining

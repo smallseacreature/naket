@@ -1,0 +1,9 @@
+---interesting data---
+
+Service codes
+Source ips & destination ips 
+Source ports & destination ports
+Errors
+manufacturers
+
+it would be pretty cool to select a device via ip and see its conversations, service vodes, and all that

@@ -1,0 +1,18 @@
+each packet is represented as a stack of protocol layers
+
+Ether is the local network frame, with things like source and destination mac, and ether type (what the next layer is)
+
+IP has source, dest, ttl, protocol, length, fragmentation
+UDP has ports, length and checksum
+
+raw means scapy found payload bytes but does not have a loaded protocol definition for them
+
+The other layers mean:
+
+ARP — IP-to-MAC address resolution
+TCP — non-BACnet TCP traffic
+ICMP — ping and network-control traffic
+Dot3 — IEEE 802.3 Ethernet framing
+LLC and SNAP — protocols carried inside some 802.3 frames
+STP — Spanning Tree Protocol traffic
+Padding — extra Ethernet bytes used to meet minimum frame size
