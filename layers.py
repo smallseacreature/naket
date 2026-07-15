@@ -50,7 +50,22 @@ def process_udp_layer(udp_layer: UDP) -> dict[str, int]:
         "destination_port": destination_port,
     }
 
-def process_raw_layer(raw_layer: Raw) -> None:
+def process_raw_layer(raw_layer: Raw) -> dict | None:
+    """
+    Process the payload contained in a Scapy Raw layer.
 
-    if raw_layer[0] in (0x81, 0x82):
-        process_bvlc(raw_layer)
+    BACnet/IP BVLC messages begin with:
+        0x81 - BACnet/IP BVLL
+        0x82 - BACnet/SC BVLL
+    """
+
+    #we need to inspect the bytes, not just the scapy object this time
+    raw_data = bytes(raw_layer.load)
+
+    if len(raw_data) < 1:
+        return None
+
+    if raw_data[0] in (0x81, 0x82):
+        return process_bvlc(raw_data)
+
+    return None

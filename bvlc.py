@@ -6,7 +6,25 @@ from constants import (
 )
 from npdu import process_npdu
 
-#---BLVC FUNCTION PROCESSORS---
+
+#BVLC is the BACnet Virtual Contol link
+#it is the layer the Bacnet/IP uses to transport BACNET messages
+
+#The BLVC header is a 4 byte header that contains:
+#type, function, length
+
+#The contents od the body depends on the function 
+
+#the function processors process the diff bodies
+#dependent on the function code
+
+#the bvlv processor parses the header and calls the 
+#functions for the body using the dispatcher
+
+#---BVLC FUNCTION PROCESSORS---
+
+#Apdu and Npdu exist in their own files due to complexity
+
 def process_result(data: bytes) -> str | None:
 
     #0x00: "BVLC Result"
@@ -172,7 +190,7 @@ def process_secure_bvll(data: bytes) -> dict | None:
         "signature": signature.hex(),
     }
 
-#---BLVC HEADER PROCESSOR---
+#---BLVC PROCESSOR---
 def process_bvlc(data: bytes) -> dict | None:
 
     # --- HEADER ---
@@ -210,7 +228,7 @@ def process_bvlc(data: bytes) -> dict | None:
     
     # --- BODY ---
     body = data[4:bvlc_length]
-    processor = BVLC_PROCESSORS.get(function_code)
+    processor = BVLC_PROCESSORS.get(function_code)  #This is where the magic happens
 
     if processor is None:
         body_result = None
@@ -228,6 +246,8 @@ def process_bvlc(data: bytes) -> dict | None:
         "bvlc_body": body_result,
     }
 
+
+#---BVLC DISPATCHER---
 BVLC_PROCESSORS = {
     0x00: process_result,
     0x01: process_bdt,
