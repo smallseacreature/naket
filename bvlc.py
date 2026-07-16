@@ -1,265 +1,373 @@
+"""Parse BACnet Virtual Link Control (BVLC) messages.
+
+This module fully parses the BACnet/IP over IPv4 BVLC header and the standard
+IPv4 BVLC function bodies used by this project. BACnet/IPv6 headers are
+recognized and preserved, but their function bodies are intentionally left
+opaque until IPv6 layer support is added to the rest of the packet pipeline.
+"""
+
+from __future__ import annotations
+
 from ipaddress import IPv4Address
+from typing import Any, Callable
+
 from constants import (
-    BVLC_FUNCTIONS,
-    BVLC_RESULT_CODES,
     BVLC_TYPES,
+    get_bvlc_function_name,
+    get_bvlc_result_name,
 )
 from npdu import process_npdu
 
 
-#BVLC is the BACnet Virtual Contol link
-#it is the layer the Bacnet/IP uses to transport BACNET messages
+BVLCRecord = dict[str, Any]
+BodyProcessor = Callable[[bytes], BVLCRecord]
 
-#The BLVC header is a 4 byte header that contains:
-#type, function, length
+BVLC_IPV4_TYPE = 0x81
+BVLC_IPV6_TYPE = 0x82
+BVLC_HEADER_LENGTH = 4
+BIP_ADDRESS_LENGTH = 6
+BDT_ENTRY_LENGTH = 10
+FDT_ENTRY_LENGTH = 10
+SECURITY_SIGNATURE_LENGTH = 16
 
-#The contents od the body depends on the function 
 
-#the function processors process the diff bodies
-#dependent on the function code
+def _valid_body(**fields: Any) -> BVLCRecord:
+    """Return fields for a successfully parsed BVLC body."""
+    return {
+        "body_parse_valid": True,
+        "body_parse_error": None,
+        **fields,
+    }
 
-#the bvlv processor parses the header and calls the 
-#functions for the body using the dispatcher
 
-#---BVLC FUNCTION PROCESSORS---
+def _invalid_body(message: str, **fields: Any) -> BVLCRecord:
+    """Return any recoverable fields from an invalid BVLC body."""
+    return {
+        "body_parse_valid": False,
+        "body_parse_error": message,
+        **fields,
+    }
 
-#Apdu and Npdu exist in their own files due to complexity
 
-def process_result(data: bytes) -> str | None:
-
-    #0x00: "BVLC Result"
-    # For this function, the body must contain only 2 bytes
+def process_result(data: bytes) -> BVLCRecord:
+    """Parse a two-octet BVLC-Result body."""
     if len(data) != 2:
-        return None
+        return _invalid_body(
+            "BVLC-Result body must be exactly 2 bytes",
+        )
 
-    result_code = int.from_bytes(data[0:2], "big")
-
-    result = BVLC_RESULT_CODES.get(result_code, "Unknown BVLC Result Code")
-
-    return(result)
-
-def process_bdt(data: bytes) -> list[dict] | None:
-
-    #0x01: "Write Broadcast Distribution Table"
-    #0x03: "Read Broadcast Distribution Table ACK"
-
-    #The body of these requests will always be made up of 10-byte BDT entries
-    if len(data) % 10 != 0:
-        return
-
-    entries = []
-
-    #since every entry is exactly 10 bytes, we enumerate them by increasing the offset each time
-    #warning: AI wrote some of this
-    for offset in range(0, len(data), 10):
-        entry = data[offset:offset + 10]
-
-        ip_address = str(IPv4Address(entry[0:4]))
-        udp_port = int.from_bytes(entry[4:6], "big")
-        broadcast_mask = str(IPv4Address(entry[6:10]))
-
-        entries.append({
-            "ip_address": ip_address,
-            "udp_port": udp_port,
-            "broadcast_mask": broadcast_mask,
-        }
+    return _valid_body(
+        result_code=int.from_bytes(data, "big"),
     )
-        
-    return entries
- 
-def process_no_body(data: bytes) -> bool:
 
-    #0x02: "Read Broadcast Distribution Table"
-    #0x06 — "Read Foreign Device Table"
-    return len(data) == 0
-    
-def process_forwarded_npdu(data: bytes) -> dict | None:
-    
-    if len(data) < 8:
-        return None
+
+def process_bdt(data: bytes) -> BVLCRecord:
+    """Parse zero or more ten-octet Broadcast Distribution Table entries."""
+    if len(data) % BDT_ENTRY_LENGTH != 0:
+        return _invalid_body(
+            "BDT body length must be a multiple of 10 bytes",
+        )
+
+    entries: list[dict[str, Any]] = []
+
+    for entry_number, offset in enumerate(
+        range(0, len(data), BDT_ENTRY_LENGTH)
+    ):
+        entry = data[offset : offset + BDT_ENTRY_LENGTH]
+
+        entries.append(
+            {
+                "entry_number": entry_number,
+                "ip_address": str(IPv4Address(entry[0:4])),
+                "udp_port": int.from_bytes(entry[4:6], "big"),
+                "broadcast_mask": str(IPv4Address(entry[6:10])),
+            }
+        )
+
+    return _valid_body(bdt_entries=entries)
+
+
+def process_no_body(data: bytes) -> BVLCRecord:
+    """Validate a BVLC function whose body must be empty."""
+    if data:
+        return _invalid_body(
+            "This BVLC function must not contain a body",
+        )
+
+    return _valid_body()
+
+
+def process_forwarded_npdu(data: bytes) -> BVLCRecord:
+    """Parse an originating B/IP address followed by an NPDU."""
+    if len(data) < BIP_ADDRESS_LENGTH:
+        return _invalid_body(
+            "Forwarded-NPDU body is missing the 6-byte originating address",
+        )
 
     originating_ip = str(IPv4Address(data[0:4]))
     originating_port = int.from_bytes(data[4:6], "big")
+    npdu_bytes = data[BIP_ADDRESS_LENGTH:]
 
-    npdu_data = data[6:]
+    if not npdu_bytes:
+        return _invalid_body(
+            "Forwarded-NPDU body does not contain an NPDU",
+            originating_ip=originating_ip,
+            originating_port=originating_port,
+            npdu=None,
+            npdu_parse_valid=False,
+        )
 
-    npdu_result = process_npdu(npdu_data)
+    npdu_result = process_npdu(npdu_bytes)
 
-    return {
-        "originating_ip": originating_ip,
-        "originating_port": originating_port,
-        "npdu": npdu_result,
-    }
+    if npdu_result is None:
+        return _invalid_body(
+            "Forwarded-NPDU contains a malformed or unsupported NPDU",
+            originating_ip=originating_ip,
+            originating_port=originating_port,
+            npdu=None,
+            npdu_parse_valid=False,
+        )
 
-def process_foreign_device_registration(data: bytes) -> dict | None:
-    
-    #0x05 — "Register Foreign Device"
-
-    if len(data) != 2:
-        return None
-
-    ttl = int.from_bytes(data[0:2], "big")
-
-    return {
-        "foreign_device_ttl": ttl,
-    }
-
-def process_fdt(data: bytes) -> list[dict] | None:
-    
-    #0x07 — "Read Foreign Device Table ACK"
-
-    # Every FDT entry is exactly 10 bytes
-    if len(data) % 10 != 0:
-        return None
-
-    entries = []
-
-    for offset in range(0, len(data), 10):
-        entry = data[offset:offset + 10]
-
-        foreign_device_ip = str(IPv4Address(entry[0:4]))
-        foreign_device_port = int.from_bytes(entry[4:6], "big")
-        ttl = int.from_bytes(entry[6:8], "big")
-        seconds_remaining = int.from_bytes(entry[8:10], "big")
-
-        entries.append({
-            "foreign_device_ip": foreign_device_ip,
-            "foreign_device_port": foreign_device_port,
-            "ttl": ttl,
-            "seconds_remaining": seconds_remaining,
-        })
-
-    return entries
-    
-def process_delete_fdt_entry(data: bytes) -> dict | None:
-    
-    if len(data) != 6:
-        return None
-
-    foreign_device_ip = str(IPv4Address(data[0:4]))
-    foreign_device_port = int.from_bytes(data[4:6], "big")
-
-    return {
-        "foreign_device_ip": foreign_device_ip,
-        "foreign_device_port": foreign_device_port,
-    }
-    
-def process_secure_bvll(data: bytes) -> dict | None:
-
-    # 0x0C: "Secure BVLL"
-    #
-    # At this point, data contains only the Security Wrapper.
-    # The four-byte BVLC header has already been removed.
-
-    # We need at least:
-    # 1 byte for the security control field
-    # 16 bytes for the required signature
-    if len(data) < 17:
-        return None
-
-    security_control = data[0]
-
-    # Extract Security Wrapper control flags
-    network_or_secure_bvll = bool(security_control & 0x80)
-    encrypted = bool(security_control & 0x40)
-    reserved = bool(security_control & 0x20)
-    authentication_present = bool(security_control & 0x10)
-    do_not_unwrap = bool(security_control & 0x08)
-    do_not_decrypt = bool(security_control & 0x04)
-    non_trusted_source = bool(security_control & 0x02)
-    secured_by_router = bool(security_control & 0x01)
-
-    # The signature is the final 16 bytes of the wrapper
-    signature = data[-16:]
-
-    # Preserve everything between the control byte and signature.
-    # We can process the complete Security Wrapper later.
-    secured_data = data[1:-16]
-
-    return {
-        "security_control": security_control,
-        "network_or_secure_bvll": network_or_secure_bvll,
-        "encrypted": encrypted,
-        "reserved": reserved,
-        "authentication_present": authentication_present,
-        "do_not_unwrap": do_not_unwrap,
-        "do_not_decrypt": do_not_decrypt,
-        "non_trusted_source": non_trusted_source,
-        "secured_by_router": secured_by_router,
-        "secured_data": secured_data,
-        "signature": signature.hex(),
-    }
-
-#---BLVC PROCESSOR---
-def process_bvlc(data: bytes) -> dict | None:
-
-    # --- HEADER ---
-    # A BVLC header contains type, function, and length.
-    # Types and functions can be observed in the constants section.
-    # A complete BVLC header is 4 bytes
-    if len(data) < 4:
-        return None
-    
-    # BVLC type
-    type_code = data[0]
-    type_name = BVLC_TYPES.get(type_code, "Unknown BVLC Type")
-
-    # This function table and dispatcher only support BACnet/IPv4
-    if type_code != 0x81:
-        return None
-
-    # BVLC function
-    function_code = data[1]
-    function_name = BVLC_FUNCTIONS.get(
-        function_code,
-        "Unknown BVLC Function"
+    return _valid_body(
+        originating_ip=originating_ip,
+        originating_port=originating_port,
+        npdu=npdu_result,
+        npdu_parse_valid=True,
     )
 
-    bvlc_length = int.from_bytes(data[2:4], "big")
-    length_valid = bvlc_length == len(data)
 
-    # A declared BVLC length cannot be smaller than its header
-    if bvlc_length < 4:
-        return None
-    
-    # Do not attempt to parse an invalid declared length
-    if not length_valid:
-        return None
-    
-    # --- BODY ---
-    body = data[4:bvlc_length]
-    processor = BVLC_PROCESSORS.get(function_code)  #This is where the magic happens
+def process_foreign_device_registration(data: bytes) -> BVLCRecord:
+    """Parse the two-octet TTL in a Register-Foreign-Device message."""
+    if len(data) != 2:
+        return _invalid_body(
+            "Register-Foreign-Device body must be exactly 2 bytes",
+        )
 
-    if processor is None:
-        body_result = None
-    else:
-        body_result = processor(body)
+    return _valid_body(
+        registration_ttl=int.from_bytes(data, "big"),
+    )
+
+
+def process_fdt(data: bytes) -> BVLCRecord:
+    """Parse zero or more ten-octet Foreign Device Table entries."""
+    if len(data) % FDT_ENTRY_LENGTH != 0:
+        return _invalid_body(
+            "FDT body length must be a multiple of 10 bytes",
+        )
+
+    entries: list[dict[str, Any]] = []
+
+    for entry_number, offset in enumerate(
+        range(0, len(data), FDT_ENTRY_LENGTH)
+    ):
+        entry = data[offset : offset + FDT_ENTRY_LENGTH]
+
+        entries.append(
+            {
+                "entry_number": entry_number,
+                "ip_address": str(IPv4Address(entry[0:4])),
+                "udp_port": int.from_bytes(entry[4:6], "big"),
+                "ttl": int.from_bytes(entry[6:8], "big"),
+                "remaining_time": int.from_bytes(entry[8:10], "big"),
+            }
+        )
+
+    return _valid_body(fdt_entries=entries)
+
+
+def process_delete_fdt_entry(data: bytes) -> BVLCRecord:
+    """Parse the six-octet B/IP address of an FDT entry to delete."""
+    if len(data) != BIP_ADDRESS_LENGTH:
+        return _invalid_body(
+            "Delete-Foreign-Device-Table-Entry body must be exactly 6 bytes",
+        )
+
+    return _valid_body(
+        delete_ip=str(IPv4Address(data[0:4])),
+        delete_port=int.from_bytes(data[4:6], "big"),
+    )
+
+
+def process_npdu_body(data: bytes) -> BVLCRecord:
+    """Parse a BVLC body that consists entirely of one NPDU."""
+    if not data:
+        return _invalid_body(
+            "BVLC function requires an NPDU body",
+            npdu=None,
+            npdu_parse_valid=False,
+        )
+
+    npdu_result = process_npdu(data)
+
+    if npdu_result is None:
+        return _invalid_body(
+            "BVLC function contains a malformed or unsupported NPDU",
+            npdu=None,
+            npdu_parse_valid=False,
+        )
+
+    return _valid_body(
+        npdu=npdu_result,
+        npdu_parse_valid=True,
+    )
+
+
+def process_secure_bvll(data: bytes) -> BVLCRecord:
+    """Preserve the major boundaries of a Secure-BVLL Security Wrapper.
+
+    The BACnet Security Wrapper is variable-length and can contain encrypted
+    fields. This parser therefore does not pretend to decode the complete
+    wrapper. It safely preserves the control octet, wrapper data, and required
+    final 16-octet signature for future security-layer processing.
+    """
+    minimum_length = 1 + SECURITY_SIGNATURE_LENGTH
+
+    if len(data) < minimum_length:
+        return _invalid_body(
+            "Secure-BVLL body is too short to contain control and signature",
+        )
 
     return {
-        "bvlc_type_code": type_code,
-        "bvlc_type": type_name,
-        "bvlc_function_code": function_code,
-        "bvlc_function": function_name,
-        "bvlc_declared_length": bvlc_length,
-        "bvlc_actual_length": len(data),
-        "bvlc_length_valid": length_valid,
-        "bvlc_body": body_result,
+        "body_parse_valid": None,
+        "body_parse_error": None,
+        "security_control": data[0],
+        "security_wrapper_data": data[1:-SECURITY_SIGNATURE_LENGTH],
+        "security_signature": data[-SECURITY_SIGNATURE_LENGTH:],
+        "unsupported_reason": (
+            "Complete BACnet Security Wrapper decoding is not implemented"
+        ),
     }
 
 
-#---BVLC DISPATCHER---
-BVLC_PROCESSORS = {
-    0x00: process_result,
-    0x01: process_bdt,
-    0x02: process_no_body,
-    0x03: process_bdt,
-    0x04: process_forwarded_npdu,
-    0x05: process_foreign_device_registration,
-    0x06: process_no_body,
-    0x07: process_fdt,
-    0x08: process_delete_fdt_entry,
-    0x09: process_npdu,
-    0x0A: process_npdu,
-    0x0B: process_npdu,
-    0x0C: process_secure_bvll,
+# The dispatcher is keyed by both BVLC type and function code. Function codes
+# are not globally unique between BACnet/IPv4 and BACnet/IPv6.
+BVLC_PROCESSORS: dict[tuple[int, int], BodyProcessor] = {
+    (BVLC_IPV4_TYPE, 0x00): process_result,
+    (BVLC_IPV4_TYPE, 0x01): process_bdt,
+    (BVLC_IPV4_TYPE, 0x02): process_no_body,
+    (BVLC_IPV4_TYPE, 0x03): process_bdt,
+    (BVLC_IPV4_TYPE, 0x04): process_forwarded_npdu,
+    (BVLC_IPV4_TYPE, 0x05): process_foreign_device_registration,
+    (BVLC_IPV4_TYPE, 0x06): process_no_body,
+    (BVLC_IPV4_TYPE, 0x07): process_fdt,
+    (BVLC_IPV4_TYPE, 0x08): process_delete_fdt_entry,
+    (BVLC_IPV4_TYPE, 0x09): process_npdu_body,
+    (BVLC_IPV4_TYPE, 0x0A): process_npdu_body,
+    (BVLC_IPV4_TYPE, 0x0B): process_npdu_body,
+    (BVLC_IPV4_TYPE, 0x0C): process_secure_bvll,
 }
+
+
+def process_bvlc(data: bytes) -> BVLCRecord | None:
+    """Parse one BACnet Virtual Link Control message.
+
+    A complete four-octet BVLC header is required. Once that header exists, the
+    function returns a record even when the declared length or function body is
+    malformed, allowing the caller to retain useful forensic information.
+    """
+    if len(data) < BVLC_HEADER_LENGTH:
+        return None
+
+    type_code = data[0]
+    function_code = data[1]
+    declared_length = int.from_bytes(data[2:4], "big")
+    actual_length = len(data)
+
+    type_name = BVLC_TYPES.get(type_code, "Unknown BVLC Type")
+    function_name = get_bvlc_function_name(type_code, function_code)
+
+    declared_length_valid = declared_length >= BVLC_HEADER_LENGTH
+    complete_declared_message = declared_length <= actual_length
+    length_valid = declared_length == actual_length and declared_length_valid
+
+    if declared_length_valid and complete_declared_message:
+        raw_body = data[BVLC_HEADER_LENGTH:declared_length]
+        trailing_data = data[declared_length:]
+    else:
+        # Preserve every received byte after the header when the declared
+        # message is impossible or truncated.
+        raw_body = data[BVLC_HEADER_LENGTH:]
+        trailing_data = b""
+
+    result: BVLCRecord = {
+        "bvlc_type_code": type_code,
+        "bvlc_type_name": type_name,
+        "function_code": function_code,
+        "function_name": function_name,
+        "declared_length": declared_length,
+        "actual_length": actual_length,
+        "length_valid": length_valid,
+        "body_parse_valid": None,
+        "body_parse_error": None,
+        "parse_valid": False,
+        "result_code": None,
+        "result_name": None,
+        "originating_ip": None,
+        "originating_port": None,
+        "registration_ttl": None,
+        "delete_ip": None,
+        "delete_port": None,
+        "bdt_entries": [],
+        "fdt_entries": [],
+        "npdu": None,
+        "npdu_parse_valid": None,
+        "security_control": None,
+        "security_wrapper_data": None,
+        "security_signature": None,
+        "raw_body": raw_body,
+        "trailing_data": trailing_data,
+        "unsupported_reason": None,
+    }
+
+    if not declared_length_valid:
+        result.update(
+            {
+                "body_parse_valid": False,
+                "body_parse_error": (
+                    "Declared BVLC length cannot be smaller than 4 bytes"
+                ),
+            }
+        )
+        return result
+
+    if not complete_declared_message:
+        result.update(
+            {
+                "body_parse_valid": False,
+                "body_parse_error": (
+                    "BVLC message is truncated before its declared length"
+                ),
+            }
+        )
+        return result
+
+    processor = BVLC_PROCESSORS.get((type_code, function_code))
+
+    if processor is None:
+        if type_code == BVLC_IPV6_TYPE:
+            unsupported_reason = (
+                "BACnet/IPv6 BVLC body parsing is not implemented"
+            )
+        elif type_code not in BVLC_TYPES:
+            unsupported_reason = "Unknown BVLC type"
+        else:
+            unsupported_reason = "Unknown or unsupported BVLC function"
+
+        result["unsupported_reason"] = unsupported_reason
+        return result
+
+    body_result = processor(raw_body)
+    result.update(body_result)
+
+    result_code = result.get("result_code")
+    if result_code is not None:
+        result["result_name"] = get_bvlc_result_name(
+            type_code,
+            result_code,
+        )
+
+    result["parse_valid"] = bool(
+        result["length_valid"] and result["body_parse_valid"]
+    )
+
+    return result
