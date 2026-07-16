@@ -1,4 +1,0 @@
-The APDU’s first byte contains two parts:
-
-Bits 7–4: APDU/PDU type
-Bits 3–0: Flags whose meaning depends on that type

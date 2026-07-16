@@ -1,6 +1,0 @@
-i get a packet
-i grab its ether, ip, udp, and raw data if they exist
-
-then, if the raw is bvlc, we start to parse all the bacnet data.
-
-so a non bacnet is processed with just those, and a bacnet is processed like crazy
